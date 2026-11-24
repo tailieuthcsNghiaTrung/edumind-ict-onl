@@ -1226,3 +1226,679 @@ interface RoomPlayer {
 interface ClassroomRoom {
   code: string;
   gameId: string;
+  grade: number;
+  className: string;
+  status: 'waiting' | 'playing' | 'finished';
+  createdAt: number;
+  players: RoomPlayer[];
+}
+
+const rooms = new Map<string, ClassroomRoom>();
+
+const generateRoomCode = () => {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < 5; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return code;
+};
+
+app.post('/api/rooms', (req, res) => {
+  const { gameId, grade, className } = req.body as {
+    gameId?: string;
+    grade?: number;
+    className?: string;
+  };
+  const code = generateRoomCode();
+  const room: ClassroomRoom = {
+    code,
+    gameId: String(gameId ?? 'knowledge-race-3d'),
+    grade: [6, 7, 8, 9].includes(Number(grade)) ? Number(grade) : 8,
+    className: String(className ?? '8A1').slice(0, 20),
+    status: 'waiting',
+    createdAt: Date.now(),
+    players: [],
+  };
+  rooms.set(code, room);
+  res.json(room);
+});
+
+app.get('/api/rooms/:code', (req, res) => {
+  const code = String(req.params.code ?? '').toUpperCase();
+  const room = rooms.get(code);
+  if (!room) {
+    res.status(404).json({ error: 'Không tìm thấy phòng học này.' });
+    return;
+  }
+  res.json(room);
+});
+
+app.post('/api/rooms/:code/join', (req, res) => {
+  const code = String(req.params.code ?? '').toUpperCase();
+  const room = rooms.get(code);
+  if (!room) {
+    res.status(404).json({ error: 'Mã phòng không tồn tại.' });
+    return;
+  }
+  const { name, carColor } = req.body as { name?: string; carColor?: string };
+  const cleanName = String(name ?? '').trim().slice(0, 50);
+  if (!cleanName) {
+    res.status(400).json({ error: 'Vui lòng chọn hoặc nhập tên học sinh.' });
+    return;
+  }
+  const existing = room.players.find((p) => p.name === cleanName);
+  if (existing) {
+    res.json({ room, player: existing });
+    return;
+  }
+  const teamNames = ['Đội Mây Xanh', 'Đội Nắng Vàng', 'Đội Cầu Vồng'];
+  const player: RoomPlayer = {
+    id: `p-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+    name: cleanName,
+    team: teamNames[room.players.length % teamNames.length],
+    carColor: carColor ?? '#2864E8',
+    progress: 0,
+    score: 0,
+    correct: 0,
+    total: 0,
+    isAnswering: false,
+    finished: false,
+    updatedAt: Date.now(),
+  };
+  room.players.push(player);
+  res.json({ room, player });
+});
+
+app.post('/api/rooms/:code/start', (req, res) => {
+  const code = String(req.params.code ?? '').toUpperCase();
+  const room = rooms.get(code);
+  if (!room) {
+    res.status(404).json({ error: 'Không tìm thấy phòng học.' });
+    return;
+  }
+  room.status = 'playing';
+  res.json(room);
+});
+
+app.post('/api/rooms/:code/progress', (req, res) => {
+  const code = String(req.params.code ?? '').toUpperCase();
+  const room = rooms.get(code);
+  if (!room) {
+    res.status(404).json({ error: 'Không tìm thấy phòng học.' });
+    return;
+  }
+  const { playerId, progress, score, correct, total, isAnswering, finished } =
+    req.body as Partial<RoomPlayer> & { playerId?: string };
+  const player = room.players.find((p) => p.id === playerId);
+  if (player) {
+    if (typeof progress === 'number') player.progress = progress;
+    if (typeof score === 'number') player.score = score;
+    if (typeof correct === 'number') player.correct = correct;
+    if (typeof total === 'number') player.total = total;
+    if (typeof isAnswering === 'boolean') player.isAnswering = isAnswering;
+    if (typeof finished === 'boolean') player.finished = finished;
+    player.updatedAt = Date.now();
+  }
+  res.json(room);
+});
+
+// ==================== AI ASSISTANT ====================
+app.post('/api/assistant', async (req, res) => {
+  try {
+    const body = req.body as {
+      messages?: IncomingMessage[];
+      grade?: number;
+      userName?: string;
+    };
+
+    const messages = Array.isArray(body.messages) ? body.messages : [];
+    const grade =
+      typeof body.grade === 'number' && [6, 7, 8, 9].includes(body.grade)
+        ? body.grade
+        : 8;
+
+    if (messages.length === 0) {
+      res.status(400).json({
+        error: 'Vui lòng nhập câu hỏi để Trợ lý học tập hỗ trợ.',
+      });
+      return;
+    }
+
+    const ai = getGeminiClient();
+    if (!ai) {
+      res.status(503).json({
+        error:
+          'Chưa cấu hình GEMINI_API_KEY trên máy chủ. Vui lòng kiểm tra mục Settings > Secrets để kích hoạt Trợ lý học tập.',
+      });
+      return;
+    }
+
+    const trimmedHistory = messages.slice(-10).map((m) => ({
+      role: m.role === 'model' ? 'model' : 'user',
+      parts: [{ text: String(m.text ?? '').slice(0, 2000) }],
+    }));
+
+    const studentHint = body.userName
+      ? `Học sinh đang trao đổi tên là ${String(body.userName).slice(0, 60)}, hiện đang học Tin học lớp ${grade}.`
+      : `Học sinh hiện đang học Tin học lớp ${grade}.`;
+
+    const systemInstruction = [
+      'Bạn là Trợ lý học tập môn Tin học THCS của hệ thống EduMind ICT Online, bám sát chương trình Giáo dục phổ thông 2018 (Tin học 6, 7, 8, 9).',
+      studentHint,
+      'Nguyên tắc trả lời:',
+      '- Giải thích rõ ràng, thân thiện, dễ hiểu với học sinh THCS bằng tiếng Việt chuẩn mực.',
+      '- Trình bày ngắn gọn, có cấu trúc (gạch đầu dòng, ví dụ minh họa thực tế như công thức Excel, khối lệnh Scratch, đơn vị đo dữ liệu, thuật toán tìm kiếm/sắp xếp).',
+      '- Khi học sinh hỏi bài tập trắc nghiệm, hãy phân tích lý do chọn đáp án đúng thay vì chỉ nêu mỗi chữ cái.',
+      '- Giữ câu trả lời súc tích khoảng 120–250 từ trừ khi học sinh yêu cầu giải thích chi tiết hơn.',
+    ].join('\n');
+
+    let response;
+    try {
+      response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: trimmedHistory,
+        config: {
+          systemInstruction,
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
+      });
+    } catch (primaryErr) {
+      const primaryMsg = sanitizeErrorSnippet(primaryErr);
+      console.warn('Assistant primary model (gemini-4-hydrogen) failed, falling back to gemini-3.1-flash-lite:', primaryMsg);
+      if (
+        primaryMsg.includes('403') ||
+        primaryMsg.includes('API_KEY_INVALID') ||
+        primaryMsg.includes('PERMISSION_DENIED')
+      ) {
+        throw primaryErr;
+      }
+      response = await ai.models.generateContent({
+        model: 'gemini-3.1-flash-lite',
+        contents: trimmedHistory,
+        config: {
+          systemInstruction,
+        },
+      });
+    }
+
+    const reply = response.text?.trim();
+    if (!reply) {
+      res.status(502).json({
+        error: 'Trợ lý chưa tạo được phản hồi phù hợp. Vui lòng thử đặt lại câu hỏi.',
+      });
+      return;
+    }
+
+    res.json({ reply });
+  } catch (err: unknown) {
+    const message = sanitizeErrorSnippet(err);
+    console.error('Assistant API error:', message);
+
+    if (message.includes('403') || message.includes('API_KEY_INVALID') || message.includes('PERMISSION_DENIED')) {
+      res.status(403).json({
+        error: 'Khóa API chưa hợp lệ hoặc thiếu quyền truy cập. Vui lòng kiểm tra khóa trong Settings > Secrets.',
+        detail: message,
+      });
+      return;
+    }
+    if (message.includes('429') || message.includes('RESOURCE_EXHAUSTED')) {
+      res.status(429).json({
+        error: 'Hệ thống đang quá tải yêu cầu trong phút này. Vui lòng đợi một chút rồi thử lại.',
+        detail: message,
+      });
+      return;
+    }
+    res.status(500).json({
+      error: 'Không thể kết nối Trợ lý học tập ngay lúc này. Vui lòng thử lại sau.',
+      detail: message,
+    });
+  }
+});
+
+// ==================== SHARED CUSTOM QUESTIONS API ====================
+const sanitizeIncomingQuestion = (raw: unknown): StoredCustomQuestion | null => {
+  if (!raw || typeof raw !== 'object') return null;
+  const item = raw as Record<string, unknown>;
+  const prompt = String(item.prompt ?? '').trim().slice(0, 600);
+  if (prompt.length < 3) return null;
+
+  const grade = normalizeGrade(item.grade);
+  const topic = String(item.topic ?? '').trim().slice(0, 160) || `Tin học ${grade}`;
+  const difficulty =
+    item.difficulty === 'easy' || item.difficulty === 'medium' || item.difficulty === 'hard'
+      ? item.difficulty
+      : 'medium';
+  const rawOpts = Array.isArray(item.options)
+    ? item.options.map((o) => String(o ?? '').trim().slice(0, 300)).filter(Boolean)
+    : [];
+  const isTf = item.questionType === 'true-false' || rawOpts.length === 2;
+  if (isTf && rawOpts.length < 2) return null;
+  if (!isTf && rawOpts.length < 4) return null;
+
+  const options = isTf
+    ? ([rawOpts[0], rawOpts[1]] as [string, string])
+    : ([rawOpts[0], rawOpts[1], rawOpts[2], rawOpts[3]] as [string, string, string, string]);
+  const maxIdx = options.length - 1;
+  const rawCorrect = Number(item.correctIndex);
+  const correctIndex =
+    Number.isFinite(rawCorrect) && rawCorrect >= 0 && rawCorrect <= maxIdx
+      ? Math.floor(rawCorrect)
+      : 0;
+  const explanation =
+    String(item.explanation ?? '').trim().slice(0, 600) ||
+    'Đáp án đúng theo nội dung chương trình Tin học THCS.';
+  const id =
+    typeof item.id === 'string' && item.id.trim().length > 0
+      ? item.id.trim().slice(0, 64)
+      : `custom-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+
+  return {
+    id,
+    grade,
+    topic,
+    difficulty,
+    questionType: isTf ? 'true-false' : 'mcq',
+    prompt,
+    options,
+    correctIndex,
+    explanation,
+  };
+};
+
+app.get('/api/questions', (_req, res) => {
+  syncServerStateFromDiskIfNewer();
+  setNoStoreHeaders(res);
+  res.json({ questions: serverState.customQuestions });
+});
+
+app.post('/api/questions', (req, res) => {
+  syncServerStateFromDiskIfNewer();
+  setNoStoreHeaders(res);
+  const body = req.body as {
+    question?: unknown;
+    questions?: unknown[];
+  };
+  const incomingList = Array.isArray(body.questions)
+    ? body.questions
+    : body.question
+      ? [body.question]
+      : [];
+  if (incomingList.length === 0) {
+    res.status(400).json({ error: 'Thiếu dữ liệu câu hỏi cần lưu.' });
+    return;
+  }
+
+  const existingPromptKeys = new Set(
+    serverState.customQuestions.map((q) => `${q.grade}::${q.prompt.trim().toLowerCase()}`)
+  );
+  const existingIds = new Set(serverState.customQuestions.map((q) => q.id));
+  const added: StoredCustomQuestion[] = [];
+
+  for (const raw of incomingList.slice(0, 50)) {
+    const cleaned = sanitizeIncomingQuestion(raw);
+    if (!cleaned) continue;
+    const pKey = `${cleaned.grade}::${cleaned.prompt.toLowerCase()}`;
+    if (existingPromptKeys.has(pKey) || existingIds.has(cleaned.id)) continue;
+    existingPromptKeys.add(pKey);
+    existingIds.add(cleaned.id);
+    added.push(cleaned);
+  }
+
+  if (added.length > 0) {
+    serverState.customQuestions = [...added, ...serverState.customQuestions].slice(0, 1000);
+    persistAndBumpRevision();
+  }
+
+  res.json({
+    ok: true,
+    added: added.length,
+    questions: serverState.customQuestions,
+  });
+});
+
+app.delete('/api/questions/:id', (req, res) => {
+  syncServerStateFromDiskIfNewer();
+  setNoStoreHeaders(res);
+  const targetId = String(req.params.id ?? '').trim();
+  if (!targetId) {
+    res.status(400).json({ error: 'Thiếu mã câu hỏi cần xóa.' });
+    return;
+  }
+  const before = serverState.customQuestions.length;
+  serverState.customQuestions = serverState.customQuestions.filter((q) => q.id !== targetId);
+  if (serverState.customQuestions.length !== before) {
+    persistAndBumpRevision();
+  }
+  res.json({ ok: true, questions: serverState.customQuestions });
+});
+
+app.post('/api/generate-questions', async (req, res) => {
+  setNoStoreHeaders(res);
+  try {
+    const body = req.body as {
+      grade?: number;
+      topic?: string;
+      customFocus?: string;
+      difficulty?: 'mixed' | 'easy' | 'medium' | 'hard';
+      count?: number;
+      existingPrompts?: string[];
+    };
+
+    const grade =
+      typeof body.grade === 'number' && [6, 7, 8, 9].includes(body.grade)
+        ? body.grade
+        : 8;
+    const count = Math.max(3, Math.min(15, Math.floor(Number(body.count) || 5)));
+    const difficulty =
+      body.difficulty && ['mixed', 'easy', 'medium', 'hard'].includes(body.difficulty)
+        ? body.difficulty
+        : 'mixed';
+    const topic = String(body.topic ?? '').trim().slice(0, 120);
+    const customFocus = String(body.customFocus ?? '').trim().slice(0, 160);
+    const existingPrompts = Array.isArray(body.existingPrompts)
+      ? body.existingPrompts
+          .map((p) => String(p ?? '').trim().slice(0, 90))
+          .filter(Boolean)
+          .slice(0, 16)
+      : [];
+
+    const ai = getGeminiClient();
+    if (!ai) {
+      res.status(503).json({
+        error:
+          'Chưa cấu hình GEMINI_API_KEY trên máy chủ. Vui lòng kiểm tra mục Settings > Secrets.',
+      });
+      return;
+    }
+
+    const gradeCurriculumMap: Record<number, string> = {
+      6: 'Tin học 6 (Bài 1–16): Bài 1 Thông tin và dữ liệu, Bài 2 Xử lí thông tin, Bài 3 Thông tin trong máy tính (Bit, Byte, KB, MB, GB, TB), Bài 4 Mạng máy tính, Bài 5 Internet, Bài 6 Mạng thông tin toàn cầu (WWW), Bài 7 Tìm kiếm thông tin trên Internet, Bài 8 Thư điện tử, Bài 9 An toàn thông tin trên Internet, Bài 10 Sơ đồ tư duy, Bài 11 Định dạng văn bản, Bài 12 Trình bày thông tin ở dạng bảng, Bài 13 Tìm kiếm và thay thế, Bài 14 Hoàn thiện sổ lưu niệm, Bài 15 Thuật toán, Bài 16 Các cấu trúc điều khiển.',
+      7: 'Tin học 7 (Bài 1–16): Bài 1 Thiết bị vào – ra, Bài 2 Phần mềm máy tính, Bài 3 Quản lí dữ liệu trong máy tính, Bài 4 Mạng xã hội và một số kênh trao đổi thông tin, Bài 5 Ứng xử trên mạng, Bài 6 Làm quen bảng tính, Bài 7 Tính toán tự động trên bảng tính, Bài 8 Công cụ hỗ trợ tính toán (SUM, AVERAGE, MAX, MIN, COUNT), Bài 9 Trình bày bảng tính, Bài 10 Hoàn thiện bảng tính, Bài 11 Tạo bài trình chiếu, Bài 12 Định dạng đối tượng trên trang chiếu, Bài 13 Hoàn thiện bài trình chiếu, Bài 14 Thuật toán tìm kiếm tuần tự, Bài 15 Thuật toán tìm kiếm nhị phân, Bài 16 Thuật toán sắp xếp.',
+      8: 'Tin học 8 (Bài 1–16): Bài 1 Lược sử công cụ tính toán, Bài 2 Thông tin trong môi trường số, Bài 3 Khai thác thông tin số, Bài 4 Đạo đức và văn hoá trong sử dụng công nghệ kĩ thuật số, Bài 5 Bảng tính giải quyết bài toán thực tế (địa chỉ tương đối/tuyệt đối/hỗn hợp), Bài 6 Sắp xếp và lọc dữ liệu, Bài 7 Trình bày dữ liệu bằng biểu đồ, Bài 8a Danh sách liệt kê và hình ảnh trong văn bản, Bài 9a Tạo đầu trang chân trang cho văn bản, Bài 10a Định dạng nâng cao cho trang chiếu, Bài 11a Sử dụng bản mẫu tạo bài trình chiếu, Bài 12 Từ thuật toán đến chương trình (Scratch), Bài 13 Biểu diễn dữ liệu (hằng, biến, kiểu dữ liệu, biểu thức), Bài 14 Cấu trúc điều khiển, Bài 15 Gỡ lỗi, Bài 16 Tin học với nghề nghiệp.',
+      9: 'Tin học 9 (Bài 1–16): Bài 1 Thế giới kĩ thuật số, Bài 2 Thông tin trong giải quyết vấn đề (4 tiêu chí), Bài 3 Đánh giá chất lượng thông tin, Bài 4 Một số vấn đề pháp lí về sử dụng dịch vụ Internet, Bài 5 Tìm hiểu phần mềm mô phỏng, Bài 6 Khai thác phần mềm mô phỏng, Bài 7 Trình bày thông tin trong trao đổi và hợp tác, Bài 8 Thực hành công cụ trực quan, Bài 9a Công cụ xác thực dữ liệu (Data Validation), Bài 10a Sử dụng hàm COUNTIF, Bài 11a Sử dụng hàm SUMIF, Bài 12a Sử dụng hàm IF, Bài 13a Hoàn thiện bảng tính quản lí tài chính gia đình, Bài 14 Giải quyết vấn đề, Bài 15 Bài toán tin học, Bài 16 Thực hành lập chương trình máy tính.',
+    };
+
+    const diffGuide =
+      difficulty === 'easy'
+        ? 'Toàn bộ ở mức Nhận biết (difficulty: "easy").'
+        : difficulty === 'medium'
+          ? 'Toàn bộ ở mức Thông hiểu (difficulty: "medium").'
+          : difficulty === 'hard'
+            ? 'Toàn bộ ở mức Vận dụng (difficulty: "hard").'
+            : 'Phân bổ cân bằng giữa easy (Nhận biết), medium (Thông hiểu) và hard (Vận dụng).';
+
+    const isSpecificLesson = Boolean(topic && topic !== 'Tất cả chủ đề');
+    const topicRequirement = isSpecificLesson
+      ? `Chỉ tạo câu hỏi đúng phạm vi kiến thức của bài "${topic}"${customFocus ? ` (trọng tâm: "${customFocus}")` : ''}, giữ nguyên chính xác trường topic là "${topic}".`
+      : customFocus
+        ? `Tập trung vào nội dung: "${customFocus}" trong chương trình Tin học ${grade}.`
+        : 'Đa dạng nhiều bài học từ Bài 1 đến Bài 16 của khối lớp này, ghi rõ tên bài ở trường topic (ví dụ: "Bài 1: ...").';
+
+    const avoidBlock =
+      existingPrompts.length > 0
+        ? `\nKhông lặp lại các câu hỏi đã có sau:\n- ${existingPrompts.join('\n- ')}`
+        : '';
+
+    const promptText = [
+      `Tạo đúng ${count} câu hỏi trắc nghiệm 4 phương án (chỉ 1 đáp án đúng duy nhất) môn ${gradeCurriculumMap[grade]}`,
+      topicRequirement,
+      diffGuide,
+      'Yêu cầu:',
+      '- Kiến thức chính xác, phù hợp học sinh THCS, câu hỏi súc tích 1–2 câu bằng tiếng Việt.',
+      '- 4 phương án trả lời độc lập, ngắn gọn, không ghi sẵn tiền tố "A.", "B.", "C.", "D." và không dùng phương án kiểu "Cả A và B" hay "Tất cả đáp án trên".',
+      '- Phân bổ đều vị trí đáp án đúng correctIndex ngẫu nhiên giữa 0, 1, 2, 3.',
+      '- Giải thích ngắn gọn 1–2 câu vì sao đáp án đó đúng.',
+      avoidBlock,
+    ].join('\n');
+
+    const questionResponseSchema = {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          topic: {
+            type: Type.STRING,
+            description: 'Tên bài học ngắn gọn thuộc chương trình Tin học của khối lớp.',
+          },
+          difficulty: {
+            type: Type.STRING,
+            description: 'Một trong 3 giá trị: easy, medium, hard',
+          },
+          prompt: {
+            type: Type.STRING,
+            description: 'Nội dung câu hỏi trắc nghiệm rõ ràng, súc tích.',
+          },
+          options: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+            description: 'Đúng 4 phương án trả lời ngắn gọn, không kèm chữ cái A/B/C/D.',
+          },
+          correctIndex: {
+            type: Type.INTEGER,
+            description: 'Chỉ số đáp án đúng từ 0 đến 3.',
+          },
+          explanation: {
+            type: Type.STRING,
+            description: 'Lời giải thích ngắn gọn vì sao đáp án đúng.',
+          },
+        },
+        required: ['topic', 'difficulty', 'prompt', 'options', 'correctIndex', 'explanation'],
+      },
+    };
+
+    const requestAi = async (modelName: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite') =>
+      ai.models.generateContent({
+        model: modelName,
+        contents: promptText,
+        config: {
+          ...(modelName === 'gemini-4-hydrogen'
+            ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+            : {}),
+          responseMimeType: 'application/json',
+          responseSchema: questionResponseSchema,
+        },
+      });
+
+    const waitMs = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const attemptModels: Array<'gemini-4-hydrogen' | 'gemini-3.1-flash-lite'> = [
+      'gemini-4-hydrogen',
+      'gemini-3.1-flash-lite',
+      'gemini-4-hydrogen',
+      'gemini-3.1-flash-lite',
+    ];
+
+    let response: Awaited<ReturnType<typeof requestAi>> | null = null;
+    let lastErr: unknown = null;
+
+    for (let i = 0; i < attemptModels.length; i++) {
+      const modelName = attemptModels[i];
+      try {
+        response = await requestAi(modelName);
+        break;
+      } catch (attemptErr) {
+        lastErr = attemptErr;
+        const msg = sanitizeErrorSnippet(attemptErr);
+        console.warn(
+          `Generate Questions attempt ${i + 1}/${attemptModels.length} (${modelName}) failed:`,
+          msg
+        );
+        if (
+          msg.includes('403') ||
+          msg.includes('API_KEY_INVALID') ||
+          msg.includes('PERMISSION_DENIED')
+        ) {
+          throw attemptErr;
+        }
+        if (i < attemptModels.length - 1) {
+          await waitMs(700 * (i + 1));
+        }
+      }
+    }
+
+    if (!response) {
+      throw lastErr ?? new Error('503 UNAVAILABLE');
+    }
+
+    const rawText = (response.text ?? '[]')
+      .trim()
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
+
+    let parsedRaw: unknown;
+    try {
+      parsedRaw = JSON.parse(rawText);
+    } catch {
+      const arrMatch = rawText.match(/\[[\s\S]*\]/);
+      parsedRaw = arrMatch ? JSON.parse(arrMatch[0]) : null;
+    }
+
+    const parsedArray = Array.isArray(parsedRaw)
+      ? parsedRaw
+      : parsedRaw &&
+          typeof parsedRaw === 'object' &&
+          Array.isArray((parsedRaw as { questions?: unknown[] }).questions)
+        ? (parsedRaw as { questions: unknown[] }).questions
+        : null;
+
+    if (!Array.isArray(parsedArray)) {
+      res.status(502).json({ error: 'AI trả về dữ liệu chưa đúng định dạng. Vui lòng thử lại.' });
+      return;
+    }
+
+    type RawAiQuestion = {
+      topic?: string;
+      difficulty?: string;
+      prompt?: string;
+      options?: string[];
+      correctIndex?: number;
+      explanation?: string;
+    };
+
+    const cleaned = (parsedArray as RawAiQuestion[])
+      .filter(
+        (item) =>
+          item &&
+          typeof item.prompt === 'string' &&
+          item.prompt.trim().length > 5 &&
+          Array.isArray(item.options) &&
+          item.options.length === 4 &&
+          item.options.every((o) => typeof o === 'string' && o.trim().length > 0)
+      )
+      .map((item) => {
+        const diff =
+          item.difficulty === 'easy' ||
+          item.difficulty === 'medium' ||
+          item.difficulty === 'hard'
+            ? item.difficulty
+            : difficulty !== 'mixed'
+              ? difficulty
+              : 'medium';
+        const origCorrect =
+          typeof item.correctIndex === 'number' &&
+          item.correctIndex >= 0 &&
+          item.correctIndex <= 3
+            ? Math.floor(item.correctIndex)
+            : 0;
+        const cleanOpts = item.options!.slice(0, 4).map((o) =>
+          o.trim().replace(/^[A-Da-d][.)]\s*/, '')
+        );
+
+        const order = [0, 1, 2, 3];
+        for (let i = order.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [order[i], order[j]] = [order[j], order[i]];
+        }
+        const shuffledOpts = order.map((idx) => cleanOpts[idx]) as [string, string, string, string];
+        const shuffledCorrectIndex = order.indexOf(origCorrect);
+
+        return {
+          grade,
+          topic: isSpecificLesson
+            ? topic
+            : (item.topic ?? '').trim() || `Tin học ${grade} (AI)`,
+          difficulty: diff,
+          questionType: 'mcq' as const,
+          prompt: item.prompt!.trim(),
+          options: shuffledOpts,
+          correctIndex: shuffledCorrectIndex >= 0 ? shuffledCorrectIndex : 0,
+          explanation:
+            (item.explanation ?? '').trim() ||
+            'Đáp án đúng theo nội dung bài học Tin học THCS.',
+        };
+      });
+
+    if (cleaned.length === 0) {
+      res.status(502).json({
+        error: 'Chưa tạo được câu hỏi hợp lệ. Vui lòng thử bấm tạo lại.',
+      });
+      return;
+    }
+
+    res.json({ questions: cleaned });
+  } catch (err: unknown) {
+    const message = sanitizeErrorSnippet(err);
+    console.error('Generate Questions API error:', message);
+
+    if (message.includes('403') || message.includes('API_KEY_INVALID') || message.includes('PERMISSION_DENIED')) {
+      res.status(403).json({
+        error: 'Khóa API chưa hợp lệ hoặc thiếu quyền truy cập. Vui lòng kiểm tra trong Settings > Secrets.',
+        detail: message,
+      });
+      return;
+    }
+    if (message.includes('429') || message.includes('RESOURCE_EXHAUSTED')) {
+      res.status(429).json({
+        error: 'Hệ thống AI đang bận trong phút này. Vui lòng đợi vài giây rồi thử lại.',
+        detail: message,
+      });
+      return;
+    }
+    if (
+      message.includes('503') ||
+      message.includes('UNAVAILABLE') ||
+      message.includes('high demand') ||
+      message.includes('overloaded') ||
+      message.includes('timed out') ||
+      message.includes('ETIMEDOUT')
+    ) {
+      res.status(503).json({
+        error:
+          'Máy chủ AI đang tạm thời quá tải lưu lượng truy cập. Vui lòng chờ 5–10 giây rồi bấm Tạo câu hỏi lại (hoặc chọn tạo 5 câu trước).',
+        detail: message,
+      });
+      return;
+    }
+    res.status(500).json({
+      error: 'Không thể tạo câu hỏi lúc này. Vui lòng thử lại sau.',
+      detail: message,
+    });
+  }
+});
+
+if (!process.env.VERCEL) {
+  (async () => {
+    if (!isProduction) {
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        root: PROJECT_ROOT,
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.resolve(PROJECT_ROOT, 'dist');
+      app.use(express.static(distPath));
+      app.get('*', (_req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    }
+
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`EduMind ICT Online server running on http://0.0.0.0:${PORT}`);
+    });
+  })();
+}
+
+export default app;
