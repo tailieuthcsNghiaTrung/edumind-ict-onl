@@ -5,7 +5,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
-import { IMPORTED_STUDENTS_SEED } from '../data/importedStudentsSeed.js';
+import { IMPORTED_STUDENTS_SEED } from '../data/importedStudentsSeed';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -19,7 +19,9 @@ const TOKEN_SIGNING_SECRET =
     ? process.env.SESSION_SECRET.trim()
     : crypto.randomBytes(32).toString('hex');
 
-const DATA_FILE_PATH = path.resolve(PROJECT_ROOT, '.edumind-data.json');
+const DATA_FILE_PATH = process.env.VERCEL
+  ? '/tmp/.edumind-data.json'
+  : path.resolve(PROJECT_ROOT, '.edumind-data.json');
 
 type PrivilegedRole = 'teacher' | 'admin';
 const ADMIN_DEFAULT_USERNAME = 'HOÀNG KHÔI VỸ';
@@ -289,7 +291,7 @@ interface IncomingMessage {
   text: string;
 }
 
-async function startServer() {
+
   const app = express();
   app.use(express.json({ limit: '1mb' }));
 
