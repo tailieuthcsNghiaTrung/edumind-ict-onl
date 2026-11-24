@@ -5,7 +5,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
-import { IMPORTED_STUDENTS_SEED } from '../data/importedStudentsSeed';
+import { IMPORTED_STUDENTS_SEED } from '../data/importedStudentsSeed.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, '..');
