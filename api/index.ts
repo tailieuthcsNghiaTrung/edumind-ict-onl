@@ -9,11 +9,69 @@ const PROJECT_ROOT = process.cwd();
 const PORT = Number(process.env.PORT) || 3000;
 const isProduction = process.env.NODE_ENV === 'production';
 
-// Ephemeral HMAC signing key per server boot (or from SESSION_SECRET if configured)
-const TOKEN_SIGNING_SECRET =
-  process.env.SESSION_SECRET && process.env.SESSION_SECRET.trim().length >= 16
-    ? process.env.SESSION_SECRET.trim()
-    : crypto.randomBytes(32).toString('hex');
+// ==================== UPSTASH REDIS (VERCEL STORAGE) CONFIG ====================
+// Tự động nhận biến môi trường từ Vercel Storage (Upstash Redis / Vercel KV)
+const REDIS_REST_URL = (
+  process.env.UPSTASH_REDIS_REST_URL ||
+  process.env.KV_REST_API_URL ||
+  ''
+)
+  .trim()
+  .replace(/\/+$/, '');
+
+const REDIS_REST_TOKEN = (
+  process.env.UPSTASH_REDIS_REST_TOKEN ||
+  process.env.KV_REST_API_TOKEN ||
+  ''
+).trim();
+
+const isRedisEnabled = Boolean(REDIS_REST_URL && REDIS_REST_TOKEN);
+
+const REDIS_KEY_STUDENTS = 'edumind:students';
+const REDIS_KEY_CREDENTIALS = 'edumind:credentials';
+const REDIS_KEY_CUSTOM_QUESTIONS = 'edumind:custom_questions';
+
+async function redisCommand<T = unknown>(
+  command: (string | number)[]
+): Promise<T | null> {
+  if (!isRedisEnabled) return null;
+  const resp = await fetch(REDIS_REST_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${REDIS_REST_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(command),
+  });
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => '');
+    throw new Error(`Upstash Redis HTTP ${resp.status}: ${errText.slice(0, 160)}`);
+  }
+  const data = (await resp.json()) as { result?: T; error?: string };
+  if (data.error) {
+    throw new Error(`Upstash Redis error: ${data.error}`);
+  }
+  return (data.result ?? null) as T | null;
+}
+
+// Stable HMAC signing key across serverless cold starts when Redis/Env is configured
+const TOKEN_SIGNING_SECRET = (() => {
+  if (process.env.SESSION_SECRET && process.env.SESSION_SECRET.trim().length >= 16) {
+    return process.env.SESSION_SECRET.trim();
+  }
+  const stableSeed =
+    REDIS_REST_TOKEN ||
+    process.env.GEMINI_API_KEY ||
+    process.env.ADMIN_PASSWORD ||
+    '';
+  if (stableSeed) {
+    return crypto
+      .createHash('sha256')
+      .update(`edumind-session-secret::${stableSeed}`)
+      .digest('hex');
+  }
+  return crypto.randomBytes(32).toString('hex');
+})();
 
 const DATA_FILE_PATH = process.env.VERCEL
   ? '/tmp/.edumind-data.json'
@@ -93,6 +151,18 @@ interface PersistedServerState {
   customQuestions: StoredCustomQuestion[];
 }
 
+function normalizeAdminCredential(
+  loadedAdmin: StoredCredential | null | undefined
+): StoredCredential | null {
+  if (!loadedAdmin) return null;
+  const copy: StoredCredential = { ...loadedAdmin };
+  if (!copy.displayName || copy.displayName === 'Quản trị hệ thống') {
+    copy.displayName = ADMIN_DEFAULT_DISPLAY_NAME;
+  }
+  copy.username = ADMIN_DEFAULT_USERNAME;
+  return copy;
+}
+
 function loadServerState(): PersistedServerState {
   const empty: PersistedServerState = {
     credentials: { admin: null, teacher: null },
@@ -103,16 +173,9 @@ function loadServerState(): PersistedServerState {
     if (!fs.existsSync(DATA_FILE_PATH)) return empty;
     const raw = fs.readFileSync(DATA_FILE_PATH, 'utf8');
     const parsed = JSON.parse(raw) as Partial<PersistedServerState>;
-    const loadedAdmin = parsed.credentials?.admin ?? null;
-    if (loadedAdmin) {
-      if (!loadedAdmin.displayName || loadedAdmin.displayName === 'Quản trị hệ thống') {
-        loadedAdmin.displayName = ADMIN_DEFAULT_DISPLAY_NAME;
-      }
-      loadedAdmin.username = ADMIN_DEFAULT_USERNAME;
-    }
     return {
       credentials: {
-        admin: loadedAdmin,
+        admin: normalizeAdminCredential(parsed.credentials?.admin ?? null),
         teacher: parsed.credentials?.teacher ?? null,
       },
       students:
@@ -133,7 +196,7 @@ function saveServerState(state: PersistedServerState) {
       mode: 0o600,
     });
   } catch (err) {
-    console.error('Failed to persist server state:', err instanceof Error ? err.message : err);
+    console.error('Failed to persist server state to disk:', err instanceof Error ? err.message : err);
   }
 }
 
@@ -294,7 +357,7 @@ let serverState = loadServerState();
 let lastDiskMtimeMs = fs.existsSync(DATA_FILE_PATH)
   ? fs.statSync(DATA_FILE_PATH).mtimeMs
   : 0;
-let analyticsRevision = 1;
+let analyticsRevision = Date.now();
 
 const setNoStoreHeaders = (res: express.Response) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -305,6 +368,7 @@ const setNoStoreHeaders = (res: express.Response) => {
 };
 
 const syncServerStateFromDiskIfNewer = () => {
+  if (isRedisEnabled) return;
   try {
     if (!fs.existsSync(DATA_FILE_PATH)) return;
     const stat = fs.statSync(DATA_FILE_PATH);
@@ -352,9 +416,10 @@ const syncServerStateFromDiskIfNewer = () => {
   }
 };
 
-const persistAndBumpRevision = () => {
+const persistDiskAndBumpRevision = () => {
+  analyticsRevision = Date.now();
+  if (isRedisEnabled) return;
   saveServerState(serverState);
-  analyticsRevision += 1;
   try {
     if (fs.existsSync(DATA_FILE_PATH)) {
       lastDiskMtimeMs = fs.statSync(DATA_FILE_PATH).mtimeMs;
@@ -363,6 +428,199 @@ const persistAndBumpRevision = () => {
     // Ignore stat error
   }
 };
+
+// ==================== PERSISTENT CLOUD STORAGE HELPERS (UPSTASH REDIS) ====================
+async function loadCredentialsFromStore(): Promise<void> {
+  if (!isRedisEnabled) {
+    syncServerStateFromDiskIfNewer();
+    return;
+  }
+  try {
+    const raw = await redisCommand<string>(['GET', REDIS_KEY_CREDENTIALS]);
+    if (typeof raw === 'string' && raw.trim()) {
+      const parsed = JSON.parse(raw) as Partial<PersistedServerState['credentials']>;
+      serverState.credentials = {
+        admin: normalizeAdminCredential(parsed.admin ?? null),
+        teacher: parsed.teacher ?? null,
+      };
+    }
+  } catch (err) {
+    console.error('Failed to load credentials from Redis:', sanitizeErrorSnippet(err));
+  }
+}
+
+async function saveCredentialsToStore(): Promise<void> {
+  if (isRedisEnabled) {
+    try {
+      await redisCommand([
+        'SET',
+        REDIS_KEY_CREDENTIALS,
+        JSON.stringify(serverState.credentials),
+      ]);
+      return;
+    } catch (err) {
+      console.error('Failed to save credentials to Redis:', sanitizeErrorSnippet(err));
+    }
+  }
+  saveServerState(serverState);
+}
+
+async function getStudentFromStore(key: string): Promise<StoredStudentAnalytics | null> {
+  if (!isRedisEnabled) {
+    syncServerStateFromDiskIfNewer();
+    return serverState.students[key] ?? null;
+  }
+  try {
+    const raw = await redisCommand<string>(['HGET', REDIS_KEY_STUDENTS, key]);
+    if (typeof raw === 'string' && raw.trim()) {
+      const parsed = JSON.parse(raw) as StoredStudentAnalytics;
+      if (parsed && typeof parsed === 'object' && parsed.name) {
+        serverState.students[key] = parsed;
+        return parsed;
+      }
+    }
+    return null;
+  } catch (err) {
+    console.error('Failed to read student from Redis:', sanitizeErrorSnippet(err));
+    return serverState.students[key] ?? null;
+  }
+}
+
+async function saveStudentToStore(
+  key: string,
+  student: StoredStudentAnalytics
+): Promise<void> {
+  serverState.students[key] = student;
+  analyticsRevision = Date.now();
+  if (isRedisEnabled) {
+    try {
+      await redisCommand([
+        'HSET',
+        REDIS_KEY_STUDENTS,
+        key,
+        JSON.stringify(student),
+      ]);
+      return;
+    } catch (err) {
+      console.error('Failed to save student to Redis:', sanitizeErrorSnippet(err));
+    }
+  }
+  persistDiskAndBumpRevision();
+}
+
+async function getAllStudentsFromStore(): Promise<Record<string, StoredStudentAnalytics>> {
+  if (!isRedisEnabled) {
+    syncServerStateFromDiskIfNewer();
+    return serverState.students;
+  }
+  try {
+    const raw = await redisCommand<string[] | Record<string, string>>([
+      'HGETALL',
+      REDIS_KEY_STUDENTS,
+    ]);
+    const loaded: Record<string, StoredStudentAnalytics> = {};
+    if (Array.isArray(raw)) {
+      for (let i = 0; i + 1 < raw.length; i += 2) {
+        const k = raw[i];
+        const v = raw[i + 1];
+        if (typeof k === 'string' && typeof v === 'string') {
+          try {
+            const parsed = JSON.parse(v) as StoredStudentAnalytics;
+            if (parsed && typeof parsed === 'object' && parsed.name) {
+              loaded[k] = parsed;
+            }
+          } catch {
+            // Skip malformed student record
+          }
+        }
+      }
+      serverState.students = loaded;
+      return loaded;
+    }
+    if (raw && typeof raw === 'object') {
+      for (const [k, v] of Object.entries(raw)) {
+        if (typeof v === 'string') {
+          try {
+            const parsed = JSON.parse(v) as StoredStudentAnalytics;
+            if (parsed && typeof parsed === 'object' && parsed.name) {
+              loaded[k] = parsed;
+            }
+          } catch {
+            // Skip malformed student record
+          }
+        }
+      }
+      serverState.students = loaded;
+      return loaded;
+    }
+    return serverState.students;
+  } catch (err) {
+    console.error('Failed to load all students from Redis:', sanitizeErrorSnippet(err));
+    return serverState.students;
+  }
+}
+
+async function saveStudentsBatchToStore(
+  entries: Array<[string, StoredStudentAnalytics]>
+): Promise<void> {
+  for (const [k, stu] of entries) {
+    serverState.students[k] = stu;
+  }
+  analyticsRevision = Date.now();
+  if (isRedisEnabled) {
+    try {
+      const BATCH_SIZE = 50;
+      for (let i = 0; i < entries.length; i += BATCH_SIZE) {
+        const chunk = entries.slice(i, i + BATCH_SIZE);
+        const args: string[] = ['HSET', REDIS_KEY_STUDENTS];
+        for (const [k, stu] of chunk) {
+          args.push(k, JSON.stringify(stu));
+        }
+        await redisCommand(args);
+      }
+      return;
+    } catch (err) {
+      console.error('Failed to batch save students to Redis:', sanitizeErrorSnippet(err));
+    }
+  }
+  persistDiskAndBumpRevision();
+}
+
+async function loadCustomQuestionsFromStore(): Promise<StoredCustomQuestion[]> {
+  if (!isRedisEnabled) {
+    syncServerStateFromDiskIfNewer();
+    return serverState.customQuestions;
+  }
+  try {
+    const raw = await redisCommand<string>(['GET', REDIS_KEY_CUSTOM_QUESTIONS]);
+    if (typeof raw === 'string' && raw.trim()) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        serverState.customQuestions = parsed as StoredCustomQuestion[];
+      }
+    }
+  } catch (err) {
+    console.error('Failed to load custom questions from Redis:', sanitizeErrorSnippet(err));
+  }
+  return serverState.customQuestions;
+}
+
+async function saveCustomQuestionsToStore(): Promise<void> {
+  analyticsRevision = Date.now();
+  if (isRedisEnabled) {
+    try {
+      await redisCommand([
+        'SET',
+        REDIS_KEY_CUSTOM_QUESTIONS,
+        JSON.stringify(serverState.customQuestions),
+      ]);
+      return;
+    } catch (err) {
+      console.error('Failed to save custom questions to Redis:', sanitizeErrorSnippet(err));
+    }
+  }
+  persistDiskAndBumpRevision();
+}
 
 const extractBearerPayload = (req: express.Request): AuthTokenPayload | null => {
   const authHeader = req.headers.authorization;
@@ -403,12 +661,15 @@ app.get('/api/health', (_req, res) => {
   res.json({
     status: 'connected',
     service: 'EduMind ICT Online',
+    storage: isRedisEnabled ? 'upstash-redis' : 'local-file',
+    persistent: isRedisEnabled,
     timestamp: new Date().toISOString(),
   });
 });
 
 // ==================== TEACHER & ADMIN AUTHENTICATION ====================
-app.get('/api/auth/status', (_req, res) => {
+app.get('/api/auth/status', async (_req, res) => {
+  await loadCredentialsFromStore();
   const envAdmin = Boolean(getEnvCredential('admin'));
   const envTeacher = Boolean(getEnvCredential('teacher'));
   const adminConfigured = isRoleConfigured('admin');
@@ -420,7 +681,8 @@ app.get('/api/auth/status', (_req, res) => {
   });
 });
 
-app.post('/api/auth/setup', (req, res) => {
+app.post('/api/auth/setup', async (req, res) => {
+  await loadCredentialsFromStore();
   const adminAlreadySet = isRoleConfigured('admin');
   const teacherAlreadySet = isRoleConfigured('teacher');
   if (adminAlreadySet && teacherAlreadySet) {
@@ -517,14 +779,15 @@ app.post('/api/auth/setup', (req, res) => {
     };
   }
 
-  saveServerState(serverState);
+  await saveCredentialsToStore();
   res.json({
     ok: true,
     configured: { admin: true, teacher: true },
   });
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
+  await loadCredentialsFromStore();
   const body = req.body as {
     role?: string;
     username?: string;
@@ -582,12 +845,14 @@ app.post('/api/auth/login', (req, res) => {
   });
 });
 
-app.get('/api/auth/me', (req, res) => {
+app.get('/api/auth/me', async (req, res) => {
   const payload = extractBearerPayload(req);
   if (!payload) {
     res.status(401).json({ error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn.' });
     return;
   }
+
+  await loadCredentialsFromStore();
 
   const buildAccountInfo = (r: PrivilegedRole) => {
     const envCred = getEnvCredential(r);
@@ -628,12 +893,14 @@ app.get('/api/auth/me', (req, res) => {
   });
 });
 
-app.post('/api/auth/credentials', (req, res) => {
+app.post('/api/auth/credentials', async (req, res) => {
   const caller = extractBearerPayload(req);
   if (!caller) {
     res.status(401).json({ error: 'Vui lòng đăng nhập lại bằng tài khoản Giáo viên hoặc Quản trị.' });
     return;
   }
+
+  await loadCredentialsFromStore();
 
   const body = req.body as {
     targetRole?: string;
@@ -714,7 +981,7 @@ app.post('/api/auth/credentials', (req, res) => {
     hash,
     updatedAt,
   };
-  saveServerState(serverState);
+  await saveCredentialsToStore();
 
   const nextToken = isSelfUpdate
     ? signAuthToken({
@@ -793,7 +1060,7 @@ const sanitizeProgressSnapshot = (
   };
 };
 
-app.post('/api/analytics/student-login', (req, res) => {
+app.post('/api/analytics/student-login', async (req, res) => {
   setNoStoreHeaders(res);
   const body = req.body as {
     name?: string;
@@ -816,12 +1083,12 @@ app.post('/api/analytics/student-login', (req, res) => {
   const nowIso = new Date().toISOString();
   const lessonsCompleted = Math.max(0, Math.min(16, Math.floor(Number(body.lessonsCompleted) || 0)));
 
-  const existing = serverState.students[key];
+  const existing = await getStudentFromStore(key);
   if (existing) {
     existing.loginCount += 1;
     existing.lastActiveAt = nowIso;
     existing.lessonsCompleted = Math.max(existing.lessonsCompleted, lessonsCompleted);
-    persistAndBumpRevision();
+    await saveStudentToStore(key, existing);
     setNoStoreHeaders(res);
     res.json({
       studentId: existing.id,
@@ -832,7 +1099,7 @@ app.post('/api/analytics/student-login', (req, res) => {
   }
 
   const id = `stu-${crypto.createHash('sha256').update(key).digest('hex').slice(0, 10)}`;
-  serverState.students[key] = {
+  const created: StoredStudentAnalytics = {
     id,
     name: cleanName,
     grade,
@@ -853,12 +1120,12 @@ app.post('/api/analytics/student-login', (req, res) => {
     weakTopic: 'Chưa có dữ liệu',
     recentSessions: [],
   };
-  persistAndBumpRevision();
+  await saveStudentToStore(key, created);
   setNoStoreHeaders(res);
   res.json({ studentId: id, progress: null, revision: analyticsRevision });
 });
 
-app.post('/api/analytics/session', (req, res) => {
+app.post('/api/analytics/session', async (req, res) => {
   setNoStoreHeaders(res);
   const body = req.body as {
     name?: string;
@@ -893,9 +1160,10 @@ app.post('/api/analytics/session', (req, res) => {
   const key = makeStudentKey(grade, cleanClass, cleanName);
   const nowIso = new Date().toISOString();
 
-  if (!serverState.students[key]) {
+  let record = await getStudentFromStore(key);
+  if (!record) {
     const id = `stu-${crypto.createHash('sha256').update(key).digest('hex').slice(0, 10)}`;
-    serverState.students[key] = {
+    record = {
       id,
       name: cleanName,
       grade,
@@ -918,7 +1186,6 @@ app.post('/api/analytics/session', (req, res) => {
     };
   }
 
-  const record = serverState.students[key];
   const forceLessonsCount = (body as { forceLessonsCount?: boolean }).forceLessonsCount === true;
   record.lastActiveAt = nowIso;
   if (typeof body.lessonsCompleted === 'number') {
@@ -984,12 +1251,12 @@ app.post('/api/analytics/session', (req, res) => {
     record.recentSessions = record.recentSessions.slice(0, 15);
   }
 
-  persistAndBumpRevision();
+  await saveStudentToStore(key, record);
   setNoStoreHeaders(res);
   res.json({ ok: true, revision: analyticsRevision });
 });
 
-app.post('/api/analytics/import', (req, res) => {
+app.post('/api/analytics/import', async (req, res) => {
   setNoStoreHeaders(res);
   const caller = extractBearerPayload(req);
   if (!caller) {
@@ -998,6 +1265,8 @@ app.post('/api/analytics/import', (req, res) => {
     });
     return;
   }
+
+  const allStudents = await getAllStudentsFromStore();
   const body = req.body as {
     students?: Array<{
       id?: string;
@@ -1023,6 +1292,7 @@ app.post('/api/analytics/import', (req, res) => {
   const list = Array.isArray(body.students) ? body.students.slice(0, 2000) : [];
   let imported = 0;
   const nowIso = new Date().toISOString();
+  const modifiedEntries: Array<[string, StoredStudentAnalytics]> = [];
 
   for (const item of list) {
     const cleanName = normalizeStudentName(String(item.name ?? ''));
@@ -1039,7 +1309,7 @@ app.post('/api/analytics/import', (req, res) => {
         ? item.id
         : `stu-${crypto.createHash('sha256').update(key).digest('hex').slice(0, 10)}`;
 
-    const existing = serverState.students[key];
+    const existing = allStudents[key];
     const sessionsCount = Math.max(0, Math.min(100000, Math.floor(Number(item.sessionsCount) || 0)));
     const totalQuestions = Math.max(
       0,
@@ -1058,7 +1328,7 @@ app.post('/api/analytics/import', (req, res) => {
     );
 
     if (!existing) {
-      serverState.students[key] = {
+      const created: StoredStudentAnalytics = {
         id,
         name: cleanName,
         grade,
@@ -1079,6 +1349,8 @@ app.post('/api/analytics/import', (req, res) => {
         weakTopic: String(item.weakTopic || 'Chưa có dữ liệu').trim().slice(0, 160) || 'Chưa có dữ liệu',
         recentSessions: [],
       };
+      allStudents[key] = created;
+      modifiedEntries.push([key, created]);
       imported += 1;
     } else {
       existing.loginCount = Math.max(existing.loginCount, Math.floor(Number(item.loginCount) || 1));
@@ -1103,21 +1375,24 @@ app.post('/api/analytics/import', (req, res) => {
       if (item.lastActiveAt && item.lastActiveAt > existing.lastActiveAt) {
         existing.lastActiveAt = String(item.lastActiveAt).slice(0, 40);
       }
+      modifiedEntries.push([key, existing]);
       imported += 1;
     }
   }
 
-  persistAndBumpRevision();
+  if (modifiedEntries.length > 0) {
+    await saveStudentsBatchToStore(modifiedEntries);
+  }
   setNoStoreHeaders(res);
   res.json({
     ok: true,
     imported,
-    totalStudents: Object.keys(serverState.students).length,
+    totalStudents: Object.keys(allStudents).length,
     revision: analyticsRevision,
   });
 });
 
-app.get('/api/analytics/summary', (req, res) => {
+app.get('/api/analytics/summary', async (req, res) => {
   setNoStoreHeaders(res);
   const caller = extractBearerPayload(req);
   if (!caller) {
@@ -1127,9 +1402,9 @@ app.get('/api/analytics/summary', (req, res) => {
     return;
   }
 
-  syncServerStateFromDiskIfNewer();
+  const allStudents = await getAllStudentsFromStore();
 
-  const students = Object.values(serverState.students).sort(
+  const students = Object.values(allStudents).sort(
     (a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime()
   );
 
@@ -1506,14 +1781,14 @@ const sanitizeIncomingQuestion = (raw: unknown): StoredCustomQuestion | null => 
   };
 };
 
-app.get('/api/questions', (_req, res) => {
-  syncServerStateFromDiskIfNewer();
+app.get('/api/questions', async (_req, res) => {
+  const questions = await loadCustomQuestionsFromStore();
   setNoStoreHeaders(res);
-  res.json({ questions: serverState.customQuestions });
+  res.json({ questions });
 });
 
-app.post('/api/questions', (req, res) => {
-  syncServerStateFromDiskIfNewer();
+app.post('/api/questions', async (req, res) => {
+  await loadCustomQuestionsFromStore();
   setNoStoreHeaders(res);
   const body = req.body as {
     question?: unknown;
@@ -1547,7 +1822,7 @@ app.post('/api/questions', (req, res) => {
 
   if (added.length > 0) {
     serverState.customQuestions = [...added, ...serverState.customQuestions].slice(0, 1000);
-    persistAndBumpRevision();
+    await saveCustomQuestionsToStore();
   }
 
   res.json({
@@ -1557,8 +1832,8 @@ app.post('/api/questions', (req, res) => {
   });
 });
 
-app.delete('/api/questions/:id', (req, res) => {
-  syncServerStateFromDiskIfNewer();
+app.delete('/api/questions/:id', async (req, res) => {
+  await loadCustomQuestionsFromStore();
   setNoStoreHeaders(res);
   const targetId = String(req.params.id ?? '').trim();
   if (!targetId) {
@@ -1568,7 +1843,7 @@ app.delete('/api/questions/:id', (req, res) => {
   const before = serverState.customQuestions.length;
   serverState.customQuestions = serverState.customQuestions.filter((q) => q.id !== targetId);
   if (serverState.customQuestions.length !== before) {
-    persistAndBumpRevision();
+    await saveCustomQuestionsToStore();
   }
   res.json({ ok: true, questions: serverState.customQuestions });
 });
