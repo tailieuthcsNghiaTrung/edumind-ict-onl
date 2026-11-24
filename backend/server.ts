@@ -5,7 +5,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
-import { IMPORTED_STUDENTS_SEED } from '../data/importedStudentsSeed';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -285,7 +285,6 @@ function sanitizeErrorSnippet(err: unknown): string {
     .replace(/key=[^&\s"']+/gi, 'key=[REDACTED]')
     .slice(0, 220);
 }
-
 interface IncomingMessage {
   role: 'user' | 'model';
   text: string;
@@ -369,72 +368,6 @@ interface IncomingMessage {
     }
   };
 
-  // Hydrate/merge historical students from the teacher's latest CSV non-destructively
-  let seededChanges = 0;
-  for (const s of IMPORTED_STUDENTS_SEED) {
-    const key = `${s.grade}::${s.className.trim().toUpperCase()}::${s.name.trim().replace(/\s+/g, ' ').toLowerCase()}`;
-    const existing = serverState.students[key];
-    if (!existing) {
-      serverState.students[key] = {
-        id: s.id,
-        name: s.name,
-        grade: s.grade,
-        className: s.className,
-        loginCount: s.loginCount,
-        firstLoginAt: s.firstLoginAt,
-        lastActiveAt: s.lastActiveAt,
-        lessonsCompleted: s.lessonsCompleted,
-        totalLessons: s.totalLessons,
-        sessionsCount: s.sessionsCount,
-        gamesPlayed: s.gamesPlayed,
-        practiceCount: s.practiceCount,
-        mockExamCount: s.mockExamCount,
-        totalCorrect: s.totalCorrect,
-        totalQuestions: s.totalQuestions,
-        avgAccuracy: s.avgAccuracy,
-        totalPoints: s.totalPoints,
-        weakTopic: s.weakTopic,
-        recentSessions: [],
-      };
-      seededChanges += 1;
-    } else if (
-      s.sessionsCount > existing.sessionsCount ||
-      s.totalPoints > existing.totalPoints ||
-      s.loginCount > existing.loginCount ||
-      s.lessonsCompleted > existing.lessonsCompleted
-    ) {
-      existing.loginCount = Math.max(existing.loginCount, s.loginCount);
-      existing.lessonsCompleted = Math.max(existing.lessonsCompleted, s.lessonsCompleted);
-      existing.sessionsCount = Math.max(existing.sessionsCount, s.sessionsCount);
-      existing.gamesPlayed = Math.max(existing.gamesPlayed, s.gamesPlayed);
-      existing.practiceCount = Math.max(existing.practiceCount, s.practiceCount);
-      existing.mockExamCount = Math.max(existing.mockExamCount, s.mockExamCount);
-      existing.totalQuestions = Math.max(existing.totalQuestions, s.totalQuestions);
-      existing.totalCorrect = Math.min(
-        existing.totalQuestions,
-        Math.max(existing.totalCorrect, s.totalCorrect)
-      );
-      existing.avgAccuracy =
-        existing.totalQuestions > 0
-          ? Math.round((existing.totalCorrect / existing.totalQuestions) * 100)
-          : Math.max(existing.avgAccuracy, s.avgAccuracy);
-      existing.totalPoints = Math.max(existing.totalPoints, s.totalPoints);
-      if (s.lastActiveAt > existing.lastActiveAt) {
-        existing.lastActiveAt = s.lastActiveAt;
-      }
-      if (
-        (!existing.weakTopic || existing.weakTopic === 'Chưa có dữ liệu') &&
-        s.weakTopic &&
-        s.weakTopic !== 'Chưa có dữ liệu'
-      ) {
-        existing.weakTopic = s.weakTopic;
-      }
-      seededChanges += 1;
-    }
-  }
-  if (seededChanges > 0) {
-    saveServerState(serverState);
-  }
 
   const extractBearerPayload = (req: express.Request): AuthTokenPayload | null => {
     const authHeader = req.headers.authorization;
