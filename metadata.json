@@ -1,0 +1,6 @@
+{
+  "name": "EduMind ICT Online",
+  "description": "Hệ thống học tập và đánh giá Tin học THCS tích hợp trò chơi trắc nghiệm tương tác dành cho học sinh lớp 6, 7, 8, 9 và giáo viên.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

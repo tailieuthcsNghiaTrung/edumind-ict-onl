@@ -1,0 +1,305 @@
+{
+  "entities": {
+    "StudentAnalyticsRecord": {
+      "title": "StudentAnalyticsRecord",
+      "description": "Aggregated cloud analytics record for an EduMind ICT student (grades 6-9), managed by verified teachers and admins.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Deterministic student document identifier."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "Student full name."
+        },
+        "grade": {
+          "type": "number",
+          "enum": [6, 7, 8, 9],
+          "description": "Middle school grade level (6, 7, 8, or 9)."
+        },
+        "className": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24,
+          "description": "Class label such as 9/2, 7A2, 8A1."
+        },
+        "loginCount": {
+          "type": "number",
+          "description": "Total number of recorded student logins."
+        },
+        "firstLoginAt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "description": "ISO timestamp of first login."
+        },
+        "lastActiveAt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "description": "ISO timestamp of most recent activity."
+        },
+        "lessonsCompleted": {
+          "type": "number",
+          "description": "Number of completed curriculum lessons (0-16)."
+        },
+        "completedLessonIds": {
+          "type": "array",
+          "description": "Optional bounded list (max 64) of completed lesson IDs merged monotonically via arrayUnion."
+        },
+        "totalLessons": {
+          "type": "number",
+          "description": "Total lessons in grade curriculum (16)."
+        },
+        "sessionsCount": {
+          "type": "number",
+          "description": "Total completed practice, game, and mock-exam sessions."
+        },
+        "gamesPlayed": {
+          "type": "number",
+          "description": "Total completed game sessions."
+        },
+        "practiceCount": {
+          "type": "number",
+          "description": "Total completed lesson practice sessions."
+        },
+        "mockExamCount": {
+          "type": "number",
+          "description": "Total completed mock exam sessions."
+        },
+        "totalCorrect": {
+          "type": "number",
+          "description": "Cumulative count of correctly answered questions."
+        },
+        "totalQuestions": {
+          "type": "number",
+          "description": "Cumulative count of answered questions."
+        },
+        "avgAccuracy": {
+          "type": "number",
+          "description": "Average accuracy percentage (0-100)."
+        },
+        "totalPoints": {
+          "type": "number",
+          "description": "Cumulative points earned across all sessions."
+        },
+        "weakTopic": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "description": "Topic needing reinforcement."
+        },
+        "source": {
+          "type": "string",
+          "enum": ["live", "csv-import"],
+          "maxLength": 20,
+          "description": "Origin of record creation or last sync."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when document was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when document was last updated."
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "grade",
+        "className",
+        "loginCount",
+        "firstLoginAt",
+        "lastActiveAt",
+        "lessonsCompleted",
+        "totalLessons",
+        "sessionsCount",
+        "gamesPlayed",
+        "practiceCount",
+        "mockExamCount",
+        "totalCorrect",
+        "totalQuestions",
+        "avgAccuracy",
+        "totalPoints",
+        "weakTopic",
+        "source",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "StudentActivityEvent": {
+      "title": "StudentActivityEvent",
+      "description": "Write-only append log submitted by student devices on login or session completion, folded into StudentAnalyticsRecord by verified teachers/admins.",
+      "type": "object",
+      "properties": {
+        "eventType": {
+          "type": "string",
+          "enum": ["login", "session"],
+          "maxLength": 16,
+          "description": "Type of activity event."
+        },
+        "studentId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Deterministic student document identifier."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "Student full name."
+        },
+        "grade": {
+          "type": "number",
+          "enum": [6, 7, 8, 9],
+          "description": "Grade level (6-9)."
+        },
+        "className": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24,
+          "description": "Student class label."
+        },
+        "lessonsCompleted": {
+          "type": "number",
+          "description": "Lessons completed count (0-16)."
+        },
+        "completedLessonIds": {
+          "type": "array",
+          "description": "Optional bounded list (max 64) of completed lesson IDs."
+        },
+        "sessionType": {
+          "type": "string",
+          "enum": ["none", "game", "practice", "mock-exam"],
+          "maxLength": 16,
+          "description": "Activity session type."
+        },
+        "sessionTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Activity title."
+        },
+        "score": {
+          "type": "number",
+          "description": "Points scored in this session."
+        },
+        "maxScore": {
+          "type": "number",
+          "description": "Maximum points possible in this session."
+        },
+        "correctCount": {
+          "type": "number",
+          "description": "Number of correct answers."
+        },
+        "totalQuestions": {
+          "type": "number",
+          "description": "Total number of questions in session."
+        },
+        "weakTopic": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "description": "Weakest topic detected for this student."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of event submission."
+        }
+      },
+      "required": [
+        "eventType",
+        "studentId",
+        "name",
+        "grade",
+        "className",
+        "lessonsCompleted",
+        "sessionType",
+        "sessionTitle",
+        "score",
+        "maxScore",
+        "correctCount",
+        "totalQuestions",
+        "weakTopic",
+        "createdAt"
+      ]
+    },
+    "StaffRoleRecord": {
+      "title": "StaffRoleRecord",
+      "description": "Trusted RBAC document authorizing a Firebase user UID as an admin or teacher.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "minLength": 3,
+          "maxLength": 120,
+          "description": "Verified staff email address."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "description": "Staff display name."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "teacher"],
+          "maxLength": 16,
+          "description": "Assigned role."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when role was granted."
+        }
+      },
+      "required": ["uid", "email", "displayName", "role", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/student_analytics/{studentId}": {
+      "schema": {
+        "$ref": "#/entities/StudentAnalyticsRecord"
+      },
+      "description": "Canonical aggregated student participation and performance records across grades 6-9. Strictly accessible only to verified admin/teacher staff."
+    },
+    "/student_events/{eventId}": {
+      "schema": {
+        "$ref": "#/entities/StudentActivityEvent"
+      },
+      "description": "Append-only student login and session events submitted from student devices and processed into student_analytics by verified staff."
+    },
+    "/admins/{uid}": {
+      "schema": {
+        "$ref": "#/entities/StaffRoleRecord"
+      },
+      "description": "Admin role registry for RBAC checks."
+    },
+    "/teachers/{uid}": {
+      "schema": {
+        "$ref": "#/entities/StaffRoleRecord"
+      },
+      "description": "Teacher role registry for RBAC checks."
+    }
+  }
+}

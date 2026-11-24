@@ -1,0 +1,291 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ==================== PRIMITIVE HELPERS ====================
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerifiedUser() && request.auth.token.email == 'khanhbp0805@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() ||
+        (isVerifiedUser() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    function isTeacher() {
+      return isVerifiedUser() && exists(/databases/$(database)/documents/teachers/$(request.auth.uid));
+    }
+
+    function isStaff() {
+      return isAdmin() || isTeacher();
+    }
+
+    function isOwner(uid) {
+      return isVerifiedUser() && request.auth.uid == uid;
+    }
+
+    // ==================== VALIDATION BLUEPRINTS ====================
+    function isValidGrade(g) {
+      return g is int && g in [6, 7, 8, 9];
+    }
+
+    function isValidCompletedLessonIds(data) {
+      return !('completedLessonIds' in data) || (
+        data.completedLessonIds is list
+        && data.completedLessonIds.size() <= 64
+        && (
+          data.completedLessonIds.size() == 0
+          || (
+            data.completedLessonIds[0] is string
+            && data.completedLessonIds[0].size() >= 1
+            && data.completedLessonIds[0].size() <= 32
+          )
+        )
+      );
+    }
+
+    function isValidStudentAnalytics(data) {
+      return data.keys().hasAll([
+          'id', 'name', 'grade', 'className', 'loginCount',
+          'firstLoginAt', 'lastActiveAt', 'lessonsCompleted', 'totalLessons',
+          'sessionsCount', 'gamesPlayed', 'practiceCount', 'mockExamCount',
+          'totalCorrect', 'totalQuestions', 'avgAccuracy', 'totalPoints',
+          'weakTopic', 'source', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'name', 'grade', 'className', 'loginCount',
+          'firstLoginAt', 'lastActiveAt', 'lessonsCompleted', 'completedLessonIds', 'totalLessons',
+          'sessionsCount', 'gamesPlayed', 'practiceCount', 'mockExamCount',
+          'totalCorrect', 'totalQuestions', 'avgAccuracy', 'totalPoints',
+          'weakTopic', 'source', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.id.size() <= 64
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && isValidGrade(data.grade)
+        && data.className is string && data.className.size() >= 1 && data.className.size() <= 24
+        && data.loginCount is int && data.loginCount >= 0 && data.loginCount <= 100000
+        && data.firstLoginAt is string && data.firstLoginAt.size() >= 1 && data.firstLoginAt.size() <= 40
+        && data.lastActiveAt is string && data.lastActiveAt.size() >= 1 && data.lastActiveAt.size() <= 40
+        && data.lessonsCompleted is int && data.lessonsCompleted >= 0 && data.lessonsCompleted <= 16
+        && isValidCompletedLessonIds(data)
+        && data.totalLessons is int && data.totalLessons >= 1 && data.totalLessons <= 32
+        && data.sessionsCount is int && data.sessionsCount >= 0 && data.sessionsCount <= 100000
+        && data.gamesPlayed is int && data.gamesPlayed >= 0 && data.gamesPlayed <= 100000
+        && data.practiceCount is int && data.practiceCount >= 0 && data.practiceCount <= 100000
+        && data.mockExamCount is int && data.mockExamCount >= 0 && data.mockExamCount <= 100000
+        && data.totalCorrect is int && data.totalCorrect >= 0 && data.totalCorrect <= 1000000
+        && data.totalQuestions is int && data.totalQuestions >= 0 && data.totalQuestions <= 1000000
+        && data.totalCorrect <= data.totalQuestions
+        && data.avgAccuracy is int && data.avgAccuracy >= 0 && data.avgAccuracy <= 100
+        && data.totalPoints is int && data.totalPoints >= 0 && data.totalPoints <= 10000000
+        && data.weakTopic is string && data.weakTopic.size() >= 1 && data.weakTopic.size() <= 160
+        && data.source is string && data.source.size() <= 20 && data.source in ['live', 'csv-import']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isMonotonicStudentSelfUpdate() {
+      return incoming().firstLoginAt == existing().firstLoginAt
+        && incoming().grade == existing().grade
+        && incoming().name == existing().name
+        && incoming().className == existing().className
+        && incoming().totalLessons == existing().totalLessons
+        && incoming().avgAccuracy == existing().avgAccuracy
+        && incoming().loginCount >= existing().loginCount
+        && incoming().loginCount <= existing().loginCount + 1
+        && incoming().sessionsCount >= existing().sessionsCount
+        && incoming().sessionsCount <= existing().sessionsCount + 1
+        && incoming().gamesPlayed >= existing().gamesPlayed
+        && incoming().gamesPlayed <= existing().gamesPlayed + 1
+        && incoming().practiceCount >= existing().practiceCount
+        && incoming().practiceCount <= existing().practiceCount + 1
+        && incoming().mockExamCount >= existing().mockExamCount
+        && incoming().mockExamCount <= existing().mockExamCount + 1
+        && incoming().lessonsCompleted >= existing().lessonsCompleted
+        && (!('completedLessonIds' in existing()) || (
+          'completedLessonIds' in incoming()
+          && incoming().completedLessonIds.size() >= existing().completedLessonIds.size()
+        ))
+        && incoming().totalQuestions >= existing().totalQuestions
+        && incoming().totalQuestions <= existing().totalQuestions + 200
+        && incoming().totalCorrect >= existing().totalCorrect
+        && incoming().totalCorrect <= existing().totalCorrect + 200
+        && incoming().totalPoints >= existing().totalPoints
+        && incoming().totalPoints <= existing().totalPoints + 10000
+        && incoming().source == 'live'
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'loginCount', 'lastActiveAt', 'lessonsCompleted', 'completedLessonIds',
+          'sessionsCount', 'gamesPlayed', 'practiceCount', 'mockExamCount',
+          'totalCorrect', 'totalQuestions', 'totalPoints', 'weakTopic',
+          'source', 'updatedAt'
+        ]);
+    }
+
+    function isValidStudentEvent(data) {
+      return data.keys().hasAll([
+          'eventType', 'studentId', 'name', 'grade', 'className',
+          'lessonsCompleted', 'sessionType', 'sessionTitle',
+          'score', 'maxScore', 'correctCount', 'totalQuestions',
+          'weakTopic', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'eventType', 'studentId', 'name', 'grade', 'className',
+          'lessonsCompleted', 'completedLessonIds', 'sessionType', 'sessionTitle',
+          'score', 'maxScore', 'correctCount', 'totalQuestions',
+          'weakTopic', 'createdAt'
+        ])
+        && data.eventType is string && data.eventType.size() <= 16 && data.eventType in ['login', 'session']
+        && isValidId(data.studentId) && data.studentId.size() <= 64
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && isValidGrade(data.grade)
+        && data.className is string && data.className.size() >= 1 && data.className.size() <= 24
+        && data.lessonsCompleted is int && data.lessonsCompleted >= 0 && data.lessonsCompleted <= 16
+        && isValidCompletedLessonIds(data)
+        && data.sessionType is string && data.sessionType.size() <= 16
+        && data.sessionType in ['none', 'game', 'practice', 'mock-exam']
+        && data.sessionTitle is string && data.sessionTitle.size() >= 1 && data.sessionTitle.size() <= 120
+        && data.score is int && data.score >= 0 && data.score <= 10000
+        && data.maxScore is int && data.maxScore >= 1 && data.maxScore <= 10000
+        && data.correctCount is int && data.correctCount >= 0 && data.correctCount <= 200
+        && data.totalQuestions is int && data.totalQuestions >= 0 && data.totalQuestions <= 200
+        && data.correctCount <= data.totalQuestions
+        && data.weakTopic is string && data.weakTopic.size() >= 1 && data.weakTopic.size() <= 160
+        && data.createdAt is timestamp
+        && data.createdAt == request.time;
+    }
+
+    function isValidStaffRole(data, expectedRole, docUid) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'createdAt'])
+        && isValidId(data.uid)
+        && data.uid == docUid
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 120
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100
+        && data.role is string && data.role.size() <= 16 && data.role == expectedRole
+        && data.createdAt is timestamp;
+    }
+
+    // ==================== COLLECTION RULES ====================
+
+    // 1. Canonical Student Analytics
+    // - Read/List: Strictly Staff-only (zero PII exposure)
+    // - Create/Update: Staff full merge OR monotonic additive student self-recording (increment / arrayUnion)
+    // - Delete: Strictly Admin-only
+    match /student_analytics/{studentId} {
+      allow get: if isVerifiedUser() && isValidId(studentId) && isStaff();
+      allow list: if isVerifiedUser() && resource.data.grade in [6, 7, 8, 9] && isStaff();
+      allow create: if isValidId(studentId)
+        && isValidStudentAnalytics(incoming())
+        && incoming().id == studentId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (isVerifiedUser() && isStaff())
+          || (
+            incoming().source == 'live'
+            && incoming().loginCount >= 1 && incoming().loginCount <= 1
+            && incoming().sessionsCount <= 1
+            && incoming().gamesPlayed <= 1
+            && incoming().practiceCount <= 1
+            && incoming().mockExamCount <= 1
+            && incoming().totalQuestions <= 200
+            && incoming().totalCorrect <= 200
+            && incoming().totalPoints <= 10000
+          )
+        );
+      allow update: if isValidId(studentId)
+        && isValidStudentAnalytics(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (
+            isVerifiedUser()
+            && isStaff()
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'grade', 'className', 'loginCount', 'firstLoginAt',
+              'lastActiveAt', 'lessonsCompleted', 'completedLessonIds', 'totalLessons',
+              'sessionsCount', 'gamesPlayed', 'practiceCount', 'mockExamCount',
+              'totalCorrect', 'totalQuestions', 'avgAccuracy', 'totalPoints',
+              'weakTopic', 'source', 'updatedAt'
+            ])
+          )
+          || isMonotonicStudentSelfUpdate()
+        );
+      allow delete: if isVerifiedUser() && isValidId(studentId) && isAdmin();
+    }
+
+    // 2. Write-only Fallback Student Activity Events (Read/Processed/Deleted strictly by staff)
+    match /student_events/{eventId} {
+      allow get: if isVerifiedUser() && isValidId(eventId) && isStaff();
+      allow list: if isVerifiedUser() && resource.data.grade in [6, 7, 8, 9] && isStaff();
+      allow create: if isValidId(eventId) && isValidStudentEvent(incoming());
+      allow update: if false;
+      allow delete: if isVerifiedUser() && isValidId(eventId) && isStaff();
+    }
+
+    // 3. Admin Role Registry
+    match /admins/{uid} {
+      allow get: if isVerifiedUser() && isValidId(uid) && (isOwner(uid) || isAdmin());
+      allow list: if isVerifiedUser() && resource.data.role == 'admin' && isAdmin();
+      allow create: if isVerifiedUser()
+        && isValidId(uid)
+        && isValidStaffRole(incoming(), 'admin', uid)
+        && incoming().createdAt == request.time
+        && isAdmin();
+      allow update: if isVerifiedUser()
+        && isValidId(uid)
+        && isValidStaffRole(incoming(), 'admin', uid)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName'])
+        && isAdmin();
+      allow delete: if isVerifiedUser() && isValidId(uid) && isAdmin();
+    }
+
+    // 4. Teacher Role Registry
+    match /teachers/{uid} {
+      allow get: if isVerifiedUser() && isValidId(uid) && (isOwner(uid) || isAdmin());
+      allow list: if isVerifiedUser() && resource.data.role == 'teacher' && isAdmin();
+      allow create: if isVerifiedUser()
+        && isValidId(uid)
+        && isValidStaffRole(incoming(), 'teacher', uid)
+        && incoming().createdAt == request.time
+        && isAdmin();
+      allow update: if isVerifiedUser()
+        && isValidId(uid)
+        && isValidStaffRole(incoming(), 'teacher', uid)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName'])
+        && isAdmin();
+      allow delete: if isVerifiedUser() && isValidId(uid) && isAdmin();
+    }
+  }
+}
