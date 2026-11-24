@@ -1,3 +1,5 @@
-import app from '../backend/server';
+if (!process.env.VERCEL) {
+  // ...
+}
 
 export default app;
