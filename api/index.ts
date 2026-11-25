@@ -9,6 +9,10 @@ const PROJECT_ROOT = process.cwd();
 const PORT = Number(process.env.PORT) || 3000;
 const isProduction = process.env.NODE_ENV === 'production';
 
+// Model IDs can be overridden in Vercel Project Settings > Environment Variables.
+const GEMINI_PRIMARY_MODEL = process.env.GEMINI_MODEL || 'gemini-4-hydrogen';
+const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.5-flash-lite';
+
 // ==================== UPSTASH REDIS (VERCEL STORAGE) CONFIG ====================
 // Tự động nhận biến môi trường từ Vercel Storage (Upstash Redis / Vercel KV)
 const REDIS_REST_URL = (
@@ -352,6 +356,36 @@ interface IncomingMessage {
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
+
+// Protect Vercel serverless instances from bursts of simultaneous Gemini calls.
+let activeAiRequests = 0;
+const MAX_CONCURRENT_AI_REQUESTS = Math.max(
+  1,
+  Math.min(10, Number(process.env.MAX_CONCURRENT_AI_REQUESTS) || 3)
+);
+const aiConcurrencyGuard: express.RequestHandler = (_req, res, next) => {
+  if (activeAiRequests >= MAX_CONCURRENT_AI_REQUESTS) {
+    res.status(503).json({
+      error: 'Trợ lý AI đang xử lý nhiều yêu cầu. Vui lòng đợi vài giây rồi thử lại.',
+      code: 'AI_BUSY',
+    });
+    return;
+  }
+  activeAiRequests += 1;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    activeAiRequests = Math.max(0, activeAiRequests - 1);
+  };
+  res.on('finish', release);
+  res.on('close', release);
+  next();
+};
+
+const isModelNotFoundError = (message: string) =>
+  /404|NOT_FOUND|model.{0,40}(not found|does not exist|unsupported)/i.test(message);
+
 
 let serverState = loadServerState();
 let lastDiskMtimeMs = fs.existsSync(DATA_FILE_PATH)
@@ -1619,7 +1653,7 @@ app.post('/api/rooms/:code/progress', (req, res) => {
 });
 
 // ==================== AI ASSISTANT ====================
-app.post('/api/assistant', async (req, res) => {
+app.post('/api/assistant', aiConcurrencyGuard, async (req, res) => {
   try {
     const body = req.body as {
       messages?: IncomingMessage[];
@@ -1671,7 +1705,7 @@ app.post('/api/assistant', async (req, res) => {
     let response;
     try {
       response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
+        model: GEMINI_PRIMARY_MODEL,
         contents: trimmedHistory,
         config: {
           systemInstruction,
@@ -1680,20 +1714,14 @@ app.post('/api/assistant', async (req, res) => {
       });
     } catch (primaryErr) {
       const primaryMsg = sanitizeErrorSnippet(primaryErr);
-      console.warn('Assistant primary model (gemini-4-hydrogen) failed, falling back to gemini-3.1-flash-lite:', primaryMsg);
-      if (
-        primaryMsg.includes('403') ||
-        primaryMsg.includes('API_KEY_INVALID') ||
-        primaryMsg.includes('PERMISSION_DENIED')
-      ) {
-        throw primaryErr;
-      }
+      // Only try another model when the configured model ID is unavailable.
+      // Retrying quota/overload errors creates more traffic and worsens the outage.
+      if (!isModelNotFoundError(primaryMsg)) throw primaryErr;
+      console.warn(`Assistant model ${GEMINI_PRIMARY_MODEL} not found; trying ${GEMINI_FALLBACK_MODEL}.`);
       response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-lite',
+        model: GEMINI_FALLBACK_MODEL,
         contents: trimmedHistory,
-        config: {
-          systemInstruction,
-        },
+        config: { systemInstruction },
       });
     }
 
@@ -1848,7 +1876,7 @@ app.delete('/api/questions/:id', async (req, res) => {
   res.json({ ok: true, questions: serverState.customQuestions });
 });
 
-app.post('/api/generate-questions', async (req, res) => {
+app.post('/api/generate-questions', aiConcurrencyGuard, async (req, res) => {
   setNoStoreHeaders(res);
   try {
     const body = req.body as {
@@ -1962,12 +1990,12 @@ app.post('/api/generate-questions', async (req, res) => {
       },
     };
 
-    const requestAi = async (modelName: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite') =>
+    const requestAi = async (modelName: string) =>
       ai.models.generateContent({
         model: modelName,
         contents: promptText,
         config: {
-          ...(modelName === 'gemini-4-hydrogen'
+          ...(modelName === GEMINI_PRIMARY_MODEL
             ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
             : {}),
           responseMimeType: 'application/json',
@@ -1975,16 +2003,9 @@ app.post('/api/generate-questions', async (req, res) => {
         },
       });
 
-    const waitMs = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-    const attemptModels: Array<'gemini-4-hydrogen' | 'gemini-3.1-flash-lite'> = [
-      'gemini-4-hydrogen',
-      'gemini-3.1-flash-lite',
-      'gemini-4-hydrogen',
-      'gemini-3.1-flash-lite',
-    ];
-
     let response: Awaited<ReturnType<typeof requestAi>> | null = null;
     let lastErr: unknown = null;
+    const attemptModels = [GEMINI_PRIMARY_MODEL, GEMINI_FALLBACK_MODEL];
 
     for (let i = 0; i < attemptModels.length; i++) {
       const modelName = attemptModels[i];
@@ -1994,20 +2015,10 @@ app.post('/api/generate-questions', async (req, res) => {
       } catch (attemptErr) {
         lastErr = attemptErr;
         const msg = sanitizeErrorSnippet(attemptErr);
-        console.warn(
-          `Generate Questions attempt ${i + 1}/${attemptModels.length} (${modelName}) failed:`,
-          msg
-        );
-        if (
-          msg.includes('403') ||
-          msg.includes('API_KEY_INVALID') ||
-          msg.includes('PERMISSION_DENIED')
-        ) {
-          throw attemptErr;
-        }
-        if (i < attemptModels.length - 1) {
-          await waitMs(700 * (i + 1));
-        }
+        console.warn(`Generate Questions model ${modelName} failed:`, msg);
+        // Do not retry 429/503: a second call usually receives the same overload.
+        if (i === 0 && isModelNotFoundError(msg)) continue;
+        throw attemptErr;
       }
     }
 
